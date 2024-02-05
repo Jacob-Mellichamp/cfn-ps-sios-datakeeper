@@ -1,12 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'AWS CloudFormation Sample Template: Windows Server 2022 EC2 instance.'
-Metadata:
-  cfn-lint:
-    config:
-      ignore_checks:
-        - E9101
-        - E1019
-        - W9006
+Description: Windows Server 2022 with SSM Document Execution
+
 Parameters:
   KeyName:
     Description: 'Name of an existing EC2 KeyPair to enable SSH access to the instance.'
@@ -16,12 +10,9 @@ Parameters:
   SGID:
     Type: AWS::EC2::SecurityGroup::Id
     Default: 'sg-009c273aca78c9346'
-  VPCID:
-    Type: AWS::EC2::VPC::Id
-    Default: 'vpc-0acd96543759aef5c'
   SubnetID:
     Type: AWS::EC2::Subnet::Id
-    Default: subnet-081b5bc0ae54e344a
+    Default: subnet-06dd84208b9f6522f
   QSS3BucketName:
     Type: String
     Default: 'quickstart-sios-datakeeper'
@@ -34,58 +25,13 @@ Parameters:
   URLSuffix:
     Type: String
     Default: ${AWS::URLSuffix}
+
 Conditions:
   UsingDefaultBucket: !Equals [!Ref QSS3BucketName, "aws-ia-us-east-1"]
 
 
 Resources:
-  SSMDocumentTest:
-    Type: AWS::SSM::Document
-    Properties:
-      DocumentType: Automation
-      Content:
-        schemaVersion: '0.3'
-        description: Deploy SIOS DKCE with SSM 
-        mainSteps:
-          - name: updateSSMAgent
-            action: aws:runCommand
-            timeoutSeconds: 300
-            inputs:
-              DocumentName: AWS-UpdateSSMAgent
-          - name: signalsuccess
-            action: aws:executeAwsApi
-            onFailure: Abort
-            isEnd: true
-            inputs:
-              Service: cloudformation
-              Api: SignalResource
-              LogicalResourceId: !Ref MyWaitCondition
-              StackName: "${AWS::StackName}"
-              Status: SUCCESS
-              UniqueId: !Ref WindowsServer2022Instance
-          # If any steps fails signals CFN of Failure
-          - name: signalfailure
-            action: aws:executeAwsApi
-            inputs:
-              Service: cloudformation
-              Api: SignalResource
-              LogicalResourceId: !Ref MyWaitCondition
-              StackName: "${AWS::StackName}"
-              Status: FAILURE
-              UniqueId: !Ref WindowsServer2022Instance
-  MySSMAssociation:
-    Type: AWS::SSM::Association
-    Properties:
-      AssociationName: SSMAutomation
-      Name: !Ref SSMDocumentTest
-      AutomationTargetParameterName: InstanceId
-      Targets:
-        - Key: ParameterValues
-          Values:
-            - !Ref WindowsServer2022Instance
-  
-  
-  InstanceRole:
+  MyInstanceRole:
     Type: AWS::IAM::Role
     Metadata:
       cfn-lint:
@@ -94,18 +40,17 @@ Resources:
             - EIAMPolicyWildcardResource
     Properties:
       AssumeRolePolicyDocument:
-        Version: 2012-10-17
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
               Service:
                 - !Sub "ec2.${AWS::URLSuffix}"
                 - !Sub "ssm.${AWS::URLSuffix}"
-            Action:
-              - sts:AssumeRole
+            Action: ['sts:AssumeRole']
       Path: /
       ManagedPolicyArns:
-        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM
       Policies:
         - PolicyName: aws-quick-start-s3-policy
           PolicyDocument:
@@ -157,6 +102,14 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:s3:::${AWS::Region}-birdwatcher-prod/*"
                   - !Sub "arn:${AWS::Partition}:s3:::patch-baseline-snapshot-${AWS::Region}/*"
                 Effect: Allow
+        - PolicyName: QS-MSSQL-SSM
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:StartAutomationExecution
+                Resource: "*"
         - PolicyName: cloudformation-policy
           PolicyDocument:
             Version: "2012-10-17"
@@ -164,18 +117,18 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudformation:SignalResource
-                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
               - Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
-                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*"
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*"
         - PolicyName: ssm-policy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: ssm:StartAutomationExecution
-                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/*:$DEFAULT
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${MySSMDocument}:$DEFAULT
               - Effect: Allow
                 Action: ssm:SendCommand
                 Resource:
@@ -196,14 +149,10 @@ Resources:
                 Action: ssm:SendCommand
                 Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
               - Effect: Allow
-                Action: ssm:SendCommand
-                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:executeAwsApi/*
-              - Effect: Allow
                 Action:
                   - ssm:DescribeInstanceInformation
                   - ssm:ListCommandInvocations
                   - ssm:ListCommands
-                  - ssm:CreateDocument
                 Resource: "*"
         - PolicyName: ec2-policy
           PolicyDocument:
@@ -217,22 +166,18 @@ Resources:
                   - fsx:DescribeFileSystems
                   - tag:GetResources
                 Resource: "*"
-  InstanceProfile:
+  MyInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      Path: /
       Roles:
-        - !Ref InstanceRole
-  #Create Instance
-  WindowsServer2022Instance:
-    Type: 'AWS::EC2::Instance'
+        - !Ref MyInstanceRole
+
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
     Properties:
+      ImageId: ami-0ebbff1010b2fbd66 # Replace with Windows Server 2022 AMI ID
       InstanceType: 'i3.large'
-      ImageId: 'ami-0ebbff1010b2fbd66'
-      IamInstanceProfile: !Ref InstanceProfile
-      EbsOptimized: true
-      KeyName: 
-        Ref: 'KeyName'
+      KeyName: !Ref KeyName
       UserData: !Base64
         Fn::Join:
           - ""
@@ -240,7 +185,7 @@ Resources:
             - "New-Item -Path C:\\ -Name log -ItemType Directory \n"
             - 'Start-Transcript -Path C:\\cfn\\log\\Start-DSCConfiguration.txt;'
             - "Start-SSMAutomationExecution -DocumentName "
-            - !Sub '"${SSMDocumentTest}"'
+            - !Sub '"${MySSMDocument}"'
             - ' -Parameter @{"QSS3BucketName"='
             - !Sub '"${QSS3BucketName}"'
             - ';"QSS3BucketRegion"='
@@ -252,17 +197,17 @@ Resources:
             - ';"URLSuffix"='
             - !Sub '"${AWS::URLSuffix}"'
             - ';"AutomationAssumeRole"='
-            - !Sub '"arn:aws:iam::${AWS::AccountId}:role/${InstanceRole}"'
+            - !Sub '"arn:aws:iam::${AWS::AccountId}:role/${MyInstanceRole}"'
             - "}"
             - ";Stop-Transcript;"
             - "</powershell>\n"
-      #SubnetId: !Ref SubnetID <-- Replace with network interface
+      IamInstanceProfile: !Ref MyInstanceProfile
       NetworkInterfaces:
         - DeviceIndex: '0'
           SubnetId: !Ref SubnetID
           AssociatePublicIpAddress: true
           GroupSet:
-            - Ref: 'SGID'
+            - 'sg-07e729f0373c790b5'
   #EC2 Volume Creation
   AdditionalVolume:
     Type: 'AWS::EC2::Volume'
@@ -270,7 +215,7 @@ Resources:
       Size: 100
       AvailabilityZone:
         Fn::GetAtt:
-          - 'WindowsServer2022Instance'
+          - 'MyEC2Instance'
           - 'AvailabilityZone'
       VolumeType: 'gp3'
   #Attach EC2 Volume
@@ -278,50 +223,88 @@ Resources:
     Type: 'AWS::EC2::VolumeAttachment'
     Properties:
       InstanceId:
-        Ref: 'WindowsServer2022Instance'
+        Ref: 'MyEC2Instance'
       VolumeId:
         Ref: 'AdditionalVolume'
       Device: '/dev/sdf'
 
-  MyWaitConditionHandle:
-    Type: AWS::CloudFormation::WaitConditionHandle
-
-  MyWaitCondition:
-    Type: AWS::CloudFormation::WaitCondition
-    DependsOn: WindowsServer2022Instance
+  MySSMDocument:
+    Type: AWS::SSM::Document
     Properties:
-      Handle: !Ref MyWaitConditionHandle
-      Timeout: '1200'  # Timeout in seconds
-      Count: 1
+      DocumentType: Automation
+      Content:
+        schemaVersion: "0.3"
+        description: Run PowerShell commands on Windows instance
+        parameters:
+          QSS3BucketName:
+            default: aws-quickstart
+            description: S3 bucket name for the Quick Start assets. Quick Start bucket name can include numbers, lowercase letters, uppercase letters, and hyphens (-). It cannot start or end with a hyphen (-).
+            type: String
+          QSS3BucketRegion:
+            default: us-east-1
+            description: The AWS Region where the Quick Start S3 bucket (QSS3BucketName) is hosted. When using your own bucket, you must specify this value.
+            type: String
+          QSS3KeyPrefix:
+            default: quickstart-microsoft-activedirectory/
+            description: S3 key prefix for the Quick Start assets. Quick Start key prefix can include numbers, lowercase letters, uppercase letters, hyphens (-), and forward slash (/).
+            type: String
+          URLSuffix:
+            description: AWS URL suffix
+            type: String
+          StackName:
+            default: ""
+            description: Stack Name Input for cfn resource signal
+            type: String
+          AutomationAssumeRole:
+            default: ""
+            description: (Optional) The ARN of the role that allows Automation to perform the actions on your behalf.
+            type: String
+        mainSteps:
+          - name: instance
+            maxAttempts: 999
+            action: aws:executeAwsApi
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: tag:aws:cloudformation:stack-name
+                  Values: ["{{StackName}}"]
+                - Name: instance-state-name
+                  Values: ["running"]
+            outputs:
+              - Name: InstanceId
+                Selector: $.Reservations[0].Instances[0].InstanceId
+                Type: String
+          - name: updateSSMAgent
+            action: aws:runCommand
+            timeoutSeconds: 300
+            inputs:
+              DocumentName: AWS-UpdateSSMAgent
+              InstanceIds: 
+                - "{{instance.InstanceId}}"
+          - name: InstallInitializeDisks
+            action: aws:runCommand
+            inputs:
+              DocumentName: 'AWS-RunRemoteScript'
+              InstanceIds: ["{{instance.InstanceId}}"]
+              parameters:
+                sourceType: 
+                  - "S3"
+                sourceInfo:
+                  -  !Sub '{"path": "https://${QSS3BucketName}.s3.${URLSuffix}/${QSS3KeyPrefix}scripts/InitializeDisks.ps1"}'
+                commandline: './initializeDisks.ps1'
 Outputs:
   InstanceId:
-    Description: 'Instance ID of the newly created EC2 instance'
-    Value: 
-      Ref: 'WindowsServer2022Instance'
-  PublicIP:
-    Description: 'Public IP address of the newly created EC2 instance'
-    Value: 
-      'Fn::GetAtt':
-        - 'WindowsServer2022Instance'
-        - 'PublicIp'
+    Description: "Instance ID of the Windows Server"
+    Value: !Ref MyEC2Instance
 
+  # MyWaitConditionHandle:
+  #   Type: AWS::CloudFormation::WaitConditionHandle
 
-
-            #       - name: InstallInitializeDisks
-            # action: aws:runCommand
-            # onFailure: step:signalfailure
-            # inputs:
-            #   DocumentName: AWS-RunRemoteScript
-            #   Parameters:
-            #     sourceType: S3
-            #     sourceInfo: !Sub
-            #       - '{"path": "https://${S3Bucket}.s3.${S3Region}.${AWS::URLSuffix}/${QSS3KeyPrefix}scripts/InitializeDisks.ps1"}'
-            #       - S3Bucket: !If
-            #           - UsingDefaultBucket
-            #           - !Sub "${QSS3BucketName}-${AWS::Region}"
-            #           - !Ref QSS3BucketName
-            #         S3Region: !If
-            #           - UsingDefaultBucket
-            #           - !Ref AWS::Region
-            #           - !Ref QSS3BucketRegion
-            #     commandline: ./initializeDisks.ps1
+  # MyWaitCondition:
+  #   Type: AWS::CloudFormation::WaitCondition
+  #   DependsOn: MyEC2Instance
+  #   Properties:
+  #     Handle: !Ref MyWaitConditionHandle
+  #     Timeout: '1200'  # Timeout in seconds
+  #     Count: 1
